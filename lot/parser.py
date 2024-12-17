@@ -30,7 +30,7 @@ def between(bra, ket, parser):
         _, s = bra(s)
         r, s = parser(s)
         _, s = ket(s)
-        return unchars(r), s
+        return r, s
 
     return parse
 
@@ -53,6 +53,23 @@ def option(default, parser):
             return parser(s)
         except:
             return default, s
+
+    return parse
+
+
+def sepby(sep, parser):
+    def parse(s):
+        o = []
+        r, s = parser(s)
+        o.append(r)
+
+        def rest(s):
+            _, s = sep(s)
+            return parser(s)
+
+        r, s = many(rest)(s)
+        o.extend(r)
+        return o, s
 
     return parse
 
@@ -90,6 +107,18 @@ def anycharbut(c):
     ('m', 'aria')
     """
     return charby(_ != c, expect=f"any character but {c}")
+
+
+def oneof(cs):
+    return charby(lambda x: x in cs, expect=f"one of {cs}")
+
+
+def digit():
+    return oneof("0123456789")
+
+
+def digits():
+    return cf_(bimap(unchars, id), some(digit()))
 
 
 def string(cs):
@@ -130,3 +159,15 @@ def anystringbut(cs):
         return unchars(o), s
 
     return parse
+
+
+def whitespaces():
+    return many(choice(char(" "), char("\n"), char("\t")))
+
+
+def lexeme(parser):
+    return between(whitespaces(), whitespaces(), parser)
+
+
+def prop(s):
+    return lexeme(between(string("["), string("]"), anystringbut("]")))(s)

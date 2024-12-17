@@ -32,3 +32,6 @@ dist/
 # venv
 .venv
 .env/
+
+# custom
+*.lot
