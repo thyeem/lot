@@ -1,7 +1,7 @@
 from foc import *
 
 
-def many(parser):
+def many(parser, fold=False):
     def go(s):
         o = []
         while True:
@@ -10,14 +10,14 @@ def many(parser):
                 o.append(r)
             except:
                 break
-        return o, s
+        return (unchars(o) if fold else o, s)
 
     return go
 
 
-def some(parser):
+def some(parser, fold=False):
     def go(s):
-        r, s = many(parser)(s)
+        r, s = many(parser, fold=fold)(s)
         if not r:
             error("Error, expected at least one successful parse.")
         return r, s
@@ -113,12 +113,16 @@ def oneof(cs):
     return charby(lambda x: x in cs, expect=f"one of {cs}")
 
 
+def noneof(cs):
+    return charby(lambda x: x not in cs, expect=f"none of {cs}")
+
+
 def digit():
     return oneof("0123456789")
 
 
 def digits():
-    return cf_(bimap(unchars, id), some(digit()))
+    return some(digit(), fold=True)
 
 
 def string(cs):
@@ -142,32 +146,45 @@ def anystring():
     >>> anystring()("sofiamaria")
     ('sofiamaria', '')
     """
-
-    def parse(s):
-        r, s = many(anychar())(s)
-        return unchars(r), s
-
-    return parse
+    return many(anychar(), fold=True)
 
 
 def anystringbut(cs):
     def parse(s):
         o = []
-        while not s.startswith(cs):
-            r, s = anycharbut(cs[0])(s)
+        while s and not s.startswith(cs):
+            r, s = anychar()(s)
             o.append(r)
         return unchars(o), s
 
     return parse
 
 
-def whitespaces():
-    return many(choice(char(" "), char("\n"), char("\t")))
+def whitespace():
+    return choice(char(" "), char("\n"), char("\t"))
 
 
-def lexeme(parser):
-    return between(whitespaces(), whitespaces(), parser)
+def comment():
+    def parse(s):
+        _, s = char("#")(s)
+        r, s = anystringbut("\n")(s)
+        return r, s
+
+    return parse
 
 
-def prop(s):
-    return lexeme(between(string("["), string("]"), anystringbut("]")))(s)
+def jump():
+    def parse(s):
+        _, s = many(choice(whitespace(), comment()), fold=True)(s)
+        return None, s
+
+    return parse
+
+
+def token(parser):
+    def parse(s):
+        r, s = parser(s)
+        _, s = jump()(s)
+        return r, s
+
+    return parse
