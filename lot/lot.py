@@ -101,11 +101,71 @@ def parse_cond(s):
         error(f"Error, failed to cond-var: {s[:16]}")
 
 
-def prepare(d, c):
-    o = ["_".join(x) for x in concat([cartprod(*x) for x in d])]
-    u = {k: {x: Bool(x) for x in o} for k, _ in c}
-    return o, u
+def prepare(domain, constraints):
+    grid = ["_".join(x) for x in concat([cartprod(*x) for x in domain])]
+    ugrid = {u: {g: Bool(f"{u}_{g}") for g in grid} for u, _ in constraints}
+    return grid, ugrid
 
 
-def solve():
-    pass
+# def init_solver(solver, ug):
+# for u in ug:
+# for grid in ug[u]:
+# solver.add(Not(ug[u][grid]))
+
+
+def in_grid(item, g):
+    return item in g.split("_")
+
+
+def set_constraints(solver, constraints, grid, ugrid):
+    for u, c in constraints:
+        if not c:
+            continue
+        for action, o in c:
+            if action == "o":
+                for item in o:
+                    for g in grid:
+                        if in_grid(item, g):
+                            solver.add(ugrid[u][g] == True)  # noqa
+            elif action == "x":
+                for item in o:
+                    for g in grid:
+                        if in_grid(item, g):
+                            solver.add(ugrid[u][g] == False)  # noqa
+            elif action == "v":
+                item, op_, val = o
+                op_ = (
+                    op.lt
+                    if op_ == "<"
+                    else (
+                        op.gt
+                        if op_ == ">"
+                        else (
+                            op.eq
+                            if op_ == "="
+                            else error(f"Error, not supported such operator: {op_}")
+                        )
+                    )
+                )
+                # TODO: check item is in grid
+                solver.add(
+                    op_(
+                        Sum([If(ugrid[u][g], 1, 0) for u in ugrid if in_grid(item, g)]),
+                        int(val),
+                    )
+                )
+            else:
+                error(f"Error, no such action: {action}")
+
+
+def nodup_completep(solver, grid, ugrid):
+    for g in grid:
+        solver.add(Sum([If(ugrid[u][g], 1, 0) for u in ugrid]) == 1)
+
+
+def solve(f):
+    domain, constraints = parse_lot(f)
+    grid, ugrid = prepare(domain, constraints)
+
+    solver = Solver()
+    # init_solver(solver, ug)
