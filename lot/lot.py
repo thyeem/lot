@@ -1,5 +1,5 @@
 from foc import *
-from ouch import reader
+from ouch import dmap, reader, shuffle
 from z3 import *
 
 from .parser import *
@@ -50,7 +50,7 @@ def parse_bar(s):
 def parse_constraint(s):
     def unit(s):
         o = []
-        u, s = token(
+        v, s = token(
             between(
                 token(string("<")),
                 token(string(">")),
@@ -58,7 +58,7 @@ def parse_constraint(s):
             )
         )(s)
         r, s = many(choice(parse_o, parse_x, parse_cond))(s)
-        return (u, r), s
+        return (v, r), s
 
     try:
         return some(unit)(s)
@@ -103,54 +103,59 @@ def parse_cond(s):
 
 def prepare(domain, constraints):
     grid = ["_".join(x) for x in concat([cartprod(*x) for x in domain])]
-    ugrid = {u: {g: Bool(f"{u}_{g}") for g in grid} for u, _ in constraints}
-    return grid, ugrid
-
-
-# def init_solver(solver, ug):
-# for u in ug:
-# for grid in ug[u]:
-# solver.add(Not(ug[u][grid]))
+    vmap = {v: {g: Bool(f"{v}_{g}") for g in grid} for v, _ in constraints}
+    return grid, vmap
 
 
 def in_grid(item, g):
     return item in g.split("_")
 
 
-def set_constraints(solver, constraints, grid, ugrid):
-    for u, c in constraints:
-        if not c:
-            continue
-        for action, o in c:
+def expr(op, lhs, rhs):
+    if op == "<":
+        return lhs < rhs
+    elif op == ">":
+        return lhs > rhs
+    elif op == "=":
+        return lhs == rhs
+    else:
+        error(f"Error, not supported such operator: {op}")
+
+
+def shuffle_solver(solver):
+    sol = Solver()
+    for assertion in shuffle(solver.assertions()):
+        sol.add(assertion)
+    return sol
+
+
+def ensure_constraints(solver, grid, vmap, constraints):
+
+    def set_grid(value, x=None):
+        for g in grid:
+            if x is None or in_grid(x, g):
+                solver.add(vmap[v][g] == value)  # noqa
+
+    for v, conds in shuffle(constraints):
+        if not conds:
+            set_grid(True)
+        for action, cond in conds:
             if action == "o":
-                for item in o:
-                    for g in grid:
-                        if in_grid(item, g):
-                            solver.add(ugrid[u][g] == True)  # noqa
+                for item in cond:
+                    set_grid(True, item)
+
             elif action == "x":
-                for item in o:
-                    for g in grid:
-                        if in_grid(item, g):
-                            solver.add(ugrid[u][g] == False)  # noqa
+                for item in cond:
+                    set_grid(False, item)
+
             elif action == "v":
-                item, op_, val = o
-                op_ = (
-                    op.lt
-                    if op_ == "<"
-                    else (
-                        op.gt
-                        if op_ == ">"
-                        else (
-                            op.eq
-                            if op_ == "="
-                            else error(f"Error, not supported such operator: {op_}")
-                        )
-                    )
-                )
-                # TODO: check item is in grid
+                item, op, val = cond
                 solver.add(
-                    op_(
-                        Sum([If(ugrid[u][g], 1, 0) for u in ugrid if in_grid(item, g)]),
+                    expr(
+                        op,
+                        Sum(
+                            [If(vmap[v][g], 1, 0) for g in grid if in_grid(item, g)],
+                        ),
                         int(val),
                     )
                 )
@@ -158,14 +163,41 @@ def set_constraints(solver, constraints, grid, ugrid):
                 error(f"Error, no such action: {action}")
 
 
-def nodup_completep(solver, grid, ugrid):
+def ensure_single_nodup(solver, grid, vmap):
     for g in grid:
-        solver.add(Sum([If(ugrid[u][g], 1, 0) for u in ugrid]) == 1)
+        solver.add(Sum([If(vmap[v][g], 1, 0) for v in vmap]) == 1)
+
+
+def by_domain(model, grid, vmap):
+    o = dict()
+    for g in grid:
+        var = [v for v in vmap if model.eval(vmap[v][g])]
+        guard(len(var) == 1, f"Error, variable not narrowed down to one: {var}")
+        o[g] = var
+    return o
+
+
+def by_var(model, grid, vmap):
+    o = dict()
+    for v in vmap:
+        assigned = [g for g in grid if model.eval(vmap[v][g])]
+        o[v] = assigned
+    return o
 
 
 def solve(f):
     domain, constraints = parse_lot(f)
-    grid, ugrid = prepare(domain, constraints)
-
+    grid, vmap = prepare(domain, constraints)
     solver = Solver()
-    # init_solver(solver, ug)
+    ensure_constraints(solver, grid, vmap, constraints)
+    ensure_single_nodup(solver, grid, vmap)
+    solver = shuffle_solver(solver)
+
+    if solver.check() == unsat:
+        error("Error, found no solution satisfying the given constraints.")
+    model = solver.model()
+    return dmap(
+        model=model,
+        d=by_domain(model, grid, vmap),
+        v=by_var(model, grid, vmap),
+    )
