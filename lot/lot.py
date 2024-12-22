@@ -1,5 +1,5 @@
 from foc import *
-from ouch import dmap, reader, shuffle
+from ouch import dmap, randint, reader, shuffle
 from z3 import *
 
 from .parser import *
@@ -135,7 +135,6 @@ def expr(op, lhs, rhs):
 
 
 def z3_constraints(constraints, grid, vmap):
-
     cmap = dict()
 
     def set_grid(x, when):
@@ -178,6 +177,7 @@ def ensure_domain_nodup(solver, grid, vmap):
 def ensure_var_occurrence(solver, grid, vmap):
     for v in vmap:
         solver.add(Sum([If(vmap[v][g], 1, 0) for g in grid]) >= 1)
+        solver.add(Sum([If(vmap[v][g], 1, 0) for g in grid]) <= 2)
 
 
 def by_domain(model, grid, vmap):
@@ -208,6 +208,7 @@ def solve(f):
     ensure_var_occurrence(solver, grid, vmap)
     ensure_domain_nodup(solver, grid, vmap)
 
+    solver.set("random_seed", randint(1 << 64))
     if solver.check() == unsat:
         # error("Error, found no solution satisfying the given constraints.")
         print("Error, found no solution satisfying the given constraints.")
