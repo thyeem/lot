@@ -92,7 +92,15 @@ def parse_cond(s):
         _, s = token(char("-"))(s)
         r, s = token(some(noneof(">=< \n\t"), fold=True))(s)
         o.append(r)
-        r, s = token(oneof(">=<"))(s)
+        r, s = token(
+            choice(
+                string("<"),
+                string("<="),
+                string(">"),
+                string(">="),
+                string("="),
+            )
+        )(s)
         o.append(r)
         r, s = token(digits())(s)
         o.append(r)
@@ -114,58 +122,62 @@ def in_grid(item, g):
 def expr(op, lhs, rhs):
     if op == "<":
         return lhs < rhs
+    elif op == "<=":
+        return lhs <= rhs
     elif op == ">":
         return lhs > rhs
+    elif op == ">=":
+        return lhs >= rhs
     elif op == "=":
         return lhs == rhs
     else:
         error(f"Error, not supported such operator: {op}")
 
 
-def shuffle_solver(solver):
-    sol = Solver()
-    for assertion in shuffle(solver.assertions()):
-        sol.add(assertion)
-    return sol
+def z3_constraints(constraints, grid, vmap):
 
+    cmap = dict()
 
-def ensure_constraints(solver, grid, vmap, constraints):
-
-    def set_grid(value, x=None):
+    def set_grid(x, when):
         for g in grid:
-            if x is None or in_grid(x, g):
-                solver.add(vmap[v][g] == value)  # noqa
+            cond = not in_grid(x, g) if when else in_grid(x, g)
+            if cond:
+                o = vmap[v][g]
+                cmap[o.decl().name()] = o == False  # noqa
 
-    for v, conds in shuffle(constraints):
-        if not conds:
-            set_grid(True)
+    for v, conds in constraints:
         for action, cond in conds:
             if action == "o":
                 for item in cond:
-                    set_grid(True, item)
+                    set_grid(item, True)
 
             elif action == "x":
                 for item in cond:
-                    set_grid(False, item)
+                    set_grid(item, False)
 
             elif action == "v":
                 item, op, val = cond
-                solver.add(
-                    expr(
-                        op,
-                        Sum(
-                            [If(vmap[v][g], 1, 0) for g in grid if in_grid(item, g)],
-                        ),
-                        int(val),
-                    )
+                e = expr(
+                    op,
+                    Sum(
+                        [If(vmap[v][g], 1, 0) for g in grid if in_grid(item, g)],
+                    ),
+                    int(val),
                 )
+                cmap[e.decl().name()] = e
             else:
                 error(f"Error, no such action: {action}")
+    return cmap
 
 
-def ensure_single_nodup(solver, grid, vmap):
+def ensure_domain_nodup(solver, grid, vmap):
     for g in grid:
         solver.add(Sum([If(vmap[v][g], 1, 0) for v in vmap]) == 1)
+
+
+def ensure_var_occurrence(solver, grid, vmap):
+    for v in vmap:
+        solver.add(Sum([If(vmap[v][g], 1, 0) for g in grid]) >= 1)
 
 
 def by_domain(model, grid, vmap):
@@ -188,13 +200,18 @@ def by_var(model, grid, vmap):
 def solve(f):
     domain, constraints = parse_lot(f)
     grid, vmap = prepare(domain, constraints)
+    cmap = z3_constraints(constraints, grid, vmap)
+
     solver = Solver()
-    ensure_constraints(solver, grid, vmap, constraints)
-    ensure_single_nodup(solver, grid, vmap)
-    solver = shuffle_solver(solver)
+    for assertion in shuffle(list(cmap.values())):
+        solver.add(assertion)
+    ensure_var_occurrence(solver, grid, vmap)
+    ensure_domain_nodup(solver, grid, vmap)
 
     if solver.check() == unsat:
-        error("Error, found no solution satisfying the given constraints.")
+        # error("Error, found no solution satisfying the given constraints.")
+        print("Error, found no solution satisfying the given constraints.")
+        return solver
     model = solver.model()
     return dmap(
         model=model,
