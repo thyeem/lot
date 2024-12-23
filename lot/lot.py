@@ -1,5 +1,5 @@
 from foc import *
-from ouch import dmap, randint, reader, shuffle
+from ouch import dmap, reader, shuffle
 from z3 import *
 
 from .parser import *
@@ -69,9 +69,9 @@ def parse_constraint(s):
 def parse_o(s):
     try:
         _, s = token(char("-"))(s)
-        _, s = token(oneof("oO"))(s)
+        a, s = token(oneof("oO"))(s)
         r, s = parse_list(s)
-        return ("o", r), s
+        return (a.lower(), r), s
     except:
         error(f"Error, failed to parse constraint 'O': {s[:16]}")
 
@@ -79,9 +79,9 @@ def parse_o(s):
 def parse_x(s):
     try:
         _, s = token(char("-"))(s)
-        _, s = token(oneof("xX"))(s)
+        a, s = token(oneof("xX"))(s)
         r, s = parse_list(s)
-        return ("x", r), s
+        return (a.lower(), r), s
     except:
         error(f"Error, failed to parse constraint 'X': {s[:16]}")
 
@@ -94,10 +94,10 @@ def parse_cond(s):
         o.append(r)
         r, s = token(
             choice(
-                string("<"),
                 string("<="),
-                string(">"),
                 string(">="),
+                string("<"),
+                string(">"),
                 string("="),
             )
         )(s)
@@ -120,102 +120,103 @@ def in_grid(item, g):
 
 
 def expr(op, lhs, rhs):
-    if op == "<":
-        return lhs < rhs
-    elif op == "<=":
-        return lhs <= rhs
-    elif op == ">":
-        return lhs > rhs
-    elif op == ">=":
-        return lhs >= rhs
-    elif op == "=":
-        return lhs == rhs
-    else:
-        error(f"Error, not supported such operator: {op}")
+    f = {
+        "<": lambda x, y: x < y,
+        "<=": lambda x, y: x <= y,
+        ">": lambda x, y: x > y,
+        ">=": lambda x, y: x >= y,
+        "=": lambda x, y: x == y,
+    }.get(op) or error(f"Error, not supported such operator: {op}")
+
+    return f(lhs, rhs)
 
 
-def z3_constraints(constraints, grid, vmap):
-    cmap = dict()
-
-    def set_grid(x, when):
-        for g in grid:
-            cond = not in_grid(x, g) if when else in_grid(x, g)
-            if cond:
-                o = vmap[v][g]
-                cmap[o.decl().name()] = o == False  # noqa
-
+def assertions(constraints, grid, vmap):
+    cmap = []
     for v, conds in constraints:
         for action, cond in conds:
             if action == "o":
-                for item in cond:
-                    set_grid(item, True)
-
+                cmap.extend(
+                    [
+                        vmap[v][g] == False  # noqa
+                        for g in grid
+                        if not any(in_grid(item, g) for item in cond)
+                    ]
+                )
             elif action == "x":
-                for item in cond:
-                    set_grid(item, False)
-
+                cmap.extend(
+                    [
+                        vmap[v][g] == False  # noqa
+                        for item in cond
+                        for g in grid
+                        if in_grid(item, g)
+                    ]
+                )
             elif action == "v":
                 item, op, val = cond
-                e = expr(
-                    op,
-                    Sum(
-                        [If(vmap[v][g], 1, 0) for g in grid if in_grid(item, g)],
-                    ),
-                    int(val),
-                )
-                cmap[e.decl().name()] = e
-            else:
-                error(f"Error, no such action: {action}")
+                lhs = Sum([If(vmap[v][g], 1, 0) for g in grid if in_grid(item, g)])
+                cmap.append(expr(op, lhs, float(val)))
     return cmap
 
 
-def ensure_domain_nodup(solver, grid, vmap):
-    for g in grid:
-        solver.add(Sum([If(vmap[v][g], 1, 0) for v in vmap]) == 1)
+def ensure_nodup_domain(grid, vmap):
+    return [Sum([If(vmap[v][g], 1, 0) for v in vmap]) == 1 for g in grid]
 
 
-def ensure_var_occurrence(solver, grid, vmap):
-    for v in vmap:
-        solver.add(Sum([If(vmap[v][g], 1, 0) for g in grid]) >= 1)
-        solver.add(Sum([If(vmap[v][g], 1, 0) for g in grid]) <= 2)
+def ensure_nodup_root(grid, vmap):
+    root = set(g.split("_")[0] for g in grid)
+    return [
+        AtMost(*[vmap[v][g] for g in grid if in_grid(r, g)], 1)
+        for v in vmap
+        for r in root
+    ]
 
 
-def by_domain(model, grid, vmap):
-    o = dict()
-    for g in grid:
-        var = [v for v in vmap if model.eval(vmap[v][g])]
-        guard(len(var) == 1, f"Error, variable not narrowed down to one: {var}")
-        o[g] = var
-    return o
+def ensure_var_occurrence(grid, vmap):
+    return [
+        And(
+            AtLeast(*[vmap[v][g] for g in grid], 1),
+            Sum(
+                [
+                    If(in_grid("평일10시", g), 0.3, 0.6) * If(vmap[v][g], 1, 0)
+                    for g in grid
+                ]
+            )
+            <= 2,
+        )
+        for v in vmap
+    ]
 
 
-def by_var(model, grid, vmap):
-    o = dict()
-    for v in vmap:
-        assigned = [g for g in grid if model.eval(vmap[v][g])]
-        o[v] = assigned
-    return o
+def sort_(x):
+    def extract(key):
+        x = key.split("_")[0]
+        return int(x) if x.isdigit() else x
+
+    if isinstance(x, dict):
+        return dict(sorted(x.items(), key=lambda x: extract(x[0])))
+    elif isinstance(x, list):
+        return sorted(x, key=extract)
+    else:
+        return x
 
 
 def solve(f):
     domain, constraints = parse_lot(f)
     grid, vmap = prepare(domain, constraints)
-    cmap = z3_constraints(constraints, grid, vmap)
 
-    solver = Solver()
-    for assertion in shuffle(list(cmap.values())):
-        solver.add(assertion)
-    ensure_var_occurrence(solver, grid, vmap)
-    ensure_domain_nodup(solver, grid, vmap)
-
-    solver.set("random_seed", randint(1 << 64))
-    if solver.check() == unsat:
-        # error("Error, found no solution satisfying the given constraints.")
-        print("Error, found no solution satisfying the given constraints.")
-        return solver
-    model = solver.model()
-    return dmap(
-        model=model,
-        d=by_domain(model, grid, vmap),
-        v=by_var(model, grid, vmap),
-    )
+    opt = Optimize()
+    opt.add(shuffle(assertions(constraints, grid, vmap)))
+    opt.add(shuffle(ensure_var_occurrence(grid, vmap)))
+    opt.add(shuffle(ensure_nodup_domain(grid, vmap)))
+    opt.add(shuffle(ensure_nodup_root(grid, vmap)))
+    if opt.check() == sat:
+        model = opt.model()
+        return dmap(
+            d=sort_(
+                {g: next(v for v in vmap if model.eval(vmap[v][g])) for g in grid},
+            ),
+            v={v: sort_([g for g in grid if model.eval(vmap[v][g])]) for v in vmap},
+        )
+    else:
+        error("Error, No solution found")
