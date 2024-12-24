@@ -13,10 +13,10 @@ def parse_lot(f):
     s = read_lot(f)
     d, s = parse_domain(s)
     _, s = parse_bar(s)
-    c, s = parse_constraint(s)
+    a, s = parse_angles(s)
     if s:
         error(f"Error, incomplete parsing: {s[:16]}")
-    return d, c  # (domains, constraints)
+    return d, a  # (domain, angles)
 
 
 def parse_domain(s):
@@ -47,9 +47,8 @@ def parse_bar(s):
         error(f"Error, failed to parse bar: {s[:16]}")
 
 
-def parse_constraint(s):
+def parse_angles(s):
     def unit(s):
-        o = []
         v, s = token(
             between(
                 token(string("<")),
@@ -63,7 +62,7 @@ def parse_constraint(s):
     try:
         return some(unit)(s)
     except:
-        error(f"Error, failed to parse constraints: {s[:16]}")
+        error(f"Error, failed to parse angles: {s[:16]}")
 
 
 def parse_o(s):
@@ -73,7 +72,7 @@ def parse_o(s):
         r, s = parse_list(s)
         return (a.lower(), r), s
     except:
-        error(f"Error, failed to parse constraint 'O': {s[:16]}")
+        error(f"Error, failed to parse 'O': {s[:16]}")
 
 
 def parse_x(s):
@@ -83,7 +82,7 @@ def parse_x(s):
         r, s = parse_list(s)
         return (a.lower(), r), s
     except:
-        error(f"Error, failed to parse constraint 'X': {s[:16]}")
+        error(f"Error, failed to parse 'X': {s[:16]}")
 
 
 def parse_cond(s):
@@ -112,7 +111,18 @@ def parse_cond(s):
 def prepare(domain, constraints):
     grid = ["_".join(x) for x in concat([cartprod(*x) for x in domain])]
     vmap = {v: {g: Bool(f"{v}_{g}") for g in grid} for v, _ in constraints}
-    return grid, vmap
+    return sort_(grid), vmap
+
+
+def from_angles(angles):
+    policy = []
+    constraints = []
+    for k, v in angles:
+        if k == "*":
+            policy.extend(v)
+        else:
+            constraints.append((k, v))
+    return constraints, policy
 
 
 def in_grid(item, g):
@@ -132,34 +142,32 @@ def expr(op, lhs, rhs):
 
 
 def assertions(constraints, grid, vmap):
-    cmap = []
+    cmap = {}
     for v, conds in constraints:
         for action, cond in conds:
             if action == "o":
-                cmap.extend(
-                    [
-                        vmap[v][g] == False  # noqa
-                        for g in grid
-                        if not any(in_grid(item, g) for item in cond)
-                    ]
-                )
+                for g in grid:
+                    if not any(in_grid(item, g) for item in cond):
+                        o = vmap[v][g]
+                        cmap[o.decl().name()] = o == False  # noqa
             elif action == "x":
-                cmap.extend(
-                    [
-                        vmap[v][g] == False  # noqa
-                        for item in cond
-                        for g in grid
-                        if in_grid(item, g)
-                    ]
-                )
+                for item in cond:
+                    for g in grid:
+                        if in_grid(item, g):
+                            o = vmap[v][g]
+                            cmap[o.decl().name()] = o == False  # noqa
             elif action == "v":
                 item, op, val = cond
-                lhs = Sum([If(vmap[v][g], 1, 0) for g in grid if in_grid(item, g)])
-                cmap.append(expr(op, lhs, float(val)))
-    return cmap
+                check = in_grid
+                if item.startswith("!"):
+                    item = item[1:]
+                    check = cf_(not_, in_grid)
+                lhs = Sum([If(vmap[v][g], 1, 0) for g in grid if check(item, g)])
+                cmap[lhs.hash()] = expr(op, lhs, int(val))
+    return list(cmap.values())
 
 
-def ensure_nodup_domain(grid, vmap):
+def ensure_nodup_populated(grid, vmap):
     return [Sum([If(vmap[v][g], 1, 0) for v in vmap]) == 1 for g in grid]
 
 
@@ -172,17 +180,28 @@ def ensure_nodup_root(grid, vmap):
     ]
 
 
-def ensure_var_occurrence(grid, vmap):
+def ensure_group_policy(policy, grid, vmap):
+    o = []
+    for v in vmap:
+        for p in policy:
+            item, op, val = cond
+            check = in_grid
+            if item.startswith("!"):
+                item = item[1:]
+                check = cf_(not_, in_grid)
+            lhs = Sum([If(vmap[v][g], 1, 0) for g in grid if check(item, g)])
+    o.append(And(expr(op, lhs, int(val))))
+    return o
     return [
         And(
             AtLeast(*[vmap[v][g] for g in grid], 1),
             Sum(
                 [
-                    If(in_grid("평일10시", g), 0.3, 0.6) * If(vmap[v][g], 1, 0)
+                    If(in_grid("평일10시", g), 0.5, 1) * If(vmap[v][g], 1, 0)
                     for g in grid
                 ]
             )
-            <= 2,
+            <= 3,
         )
         for v in vmap
     ]
@@ -201,22 +220,29 @@ def sort_(x):
         return x
 
 
+def res_by_var(model, grid, vmap):
+    return {v: sort_([g for g in grid if model.eval(vmap[v][g])]) for v in vmap}
+
+
+def res_by_domain(model, grid, vmap):
+    return sort_({g: fst(v for v in vmap if model.eval(vmap[v][g])) for g in grid})
+
+
 def solve(f):
-    domain, constraints = parse_lot(f)
+    domain, (constraints, policy) = second(from_angles, parse_lot(f))
     grid, vmap = prepare(domain, constraints)
 
     opt = Optimize()
     opt.add(shuffle(assertions(constraints, grid, vmap)))
-    opt.add(shuffle(ensure_var_occurrence(grid, vmap)))
-    opt.add(shuffle(ensure_nodup_domain(grid, vmap)))
+    opt.add(shuffle(ensure_nodup_populated(grid, vmap)))
+
+    opt.add(shuffle(ensure_group_policy(policy, grid, vmap)))
     opt.add(shuffle(ensure_nodup_root(grid, vmap)))
     if opt.check() == sat:
         model = opt.model()
         return dmap(
-            d=sort_(
-                {g: next(v for v in vmap if model.eval(vmap[v][g])) for g in grid},
-            ),
-            v={v: sort_([g for g in grid if model.eval(vmap[v][g])]) for v in vmap},
+            d=res_by_domain(model, grid, vmap),
+            v=res_by_var(model, grid, vmap),
         )
     else:
         error("Error, No solution found")
