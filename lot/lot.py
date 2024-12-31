@@ -109,9 +109,9 @@ def parse_cond(s):
 
 
 def prepare(domain, constraints):
-    grid = ["_".join(x) for x in concat([cartprod(*x) for x in domain])]
-    vmap = {v: {g: Bool(f"{v}_{g}") for g in grid} for v, _ in constraints}
-    return sort_(grid), vmap
+    nodes = ["_".join(x) for x in concat([cartprod(*x) for x in domain])]
+    vmap = {v: {n: Bool(f"{v}_{n}") for n in nodes} for v, _ in constraints}
+    return sort_(nodes), vmap  # (all-nodes-in-domain, Z3-var-map)
 
 
 def from_angles(angles):
@@ -125,8 +125,23 @@ def from_angles(angles):
     return constraints, policy
 
 
-def in_grid(item, g):
-    return item in g.split("_")
+def key_in_node(key, node):
+    return key in node.split("_")
+
+
+def keys_in_node(keys, node):
+    return set(keys).issubset(set(node.split("_")))
+
+
+def nodes_with_keys(keys, nodes):
+    bases = mapl(set, zip(*[n.split("_") for n in nodes]))
+    o = {i: [] for i in range(len(bases))}
+    for key in keys:
+        for i in range(len(bases)):
+            if key in bases[i]:
+                o[i].append(key)
+    cart = cartprodl(*filter(null | not_, o.values()))
+    return {n for n in nodes if any(keys_in_node(c, n) for c in cart)}
 
 
 def expr(op, lhs, rhs):
@@ -141,70 +156,61 @@ def expr(op, lhs, rhs):
     return f(lhs, rhs)
 
 
-def assertions(constraints, grid, vmap):
+def assertions(constraints, nodes, vmap):
+    def assert_by_expr(keys, cmap, nodes, vmap):
+        key, op, val = keys
+        check = key_in_node
+        if key.startswith("!"):
+            key = key[1:]
+            check = cf_(not_, key_in_node)
+        lhs = Sum([If(vmap[v][n], 1, 0) for n in nodes if check(key, n)])
+        cmap[str(lhs)] = expr(op, lhs, int(val))
+
     cmap = {}
-    for v, conds in constraints:
-        for action, cond in conds:
+    for v, cs in constraints:
+        for action, keys in cs:
             if action == "o":
-                for g in grid:
-                    if not any(in_grid(item, g) for item in cond):
-                        o = vmap[v][g]
-                        cmap[o.decl().name()] = o == False  # noqa
+                for n in set(nodes) - nodes_with_keys(keys, nodes):
+                    o = vmap[v][n]
+                    cmap[o.decl().name()] = o == False  # noqa
             elif action == "x":
-                for item in cond:
-                    for g in grid:
-                        if in_grid(item, g):
-                            o = vmap[v][g]
-                            cmap[o.decl().name()] = o == False  # noqa
+                for key in keys:
+                    assert_by_expr((key, "=", "0"), cmap, nodes, vmap)
             elif action == "v":
-                item, op, val = cond
-                check = in_grid
-                if item.startswith("!"):
-                    item = item[1:]
-                    check = cf_(not_, in_grid)
-                lhs = Sum([If(vmap[v][g], 1, 0) for g in grid if check(item, g)])
-                cmap[lhs.hash()] = expr(op, lhs, int(val))
+                assert_by_expr(keys, cmap, nodes, vmap)
     return list(cmap.values())
 
 
-def ensure_nodup_populated(grid, vmap):
-    return [Sum([If(vmap[v][g], 1, 0) for v in vmap]) == 1 for g in grid]
+def ensure_nodup_populated(nodes, vmap):
+    return [Sum([If(vmap[v][n], 1, 0) for v in vmap]) == 1 for n in nodes]
 
 
-def ensure_nodup_root(grid, vmap):
-    root = set(g.split("_")[0] for g in grid)
+def ensure_nodup_root(nodes, vmap):
+    root = set(n.split("_")[0] for n in nodes)
     return [
-        AtMost(*[vmap[v][g] for g in grid if in_grid(r, g)], 1)
+        AtMost(*[vmap[v][n] for n in nodes if key_in_node(r, n)], 1)
         for v in vmap
         for r in root
     ]
 
 
-def ensure_group_policy(policy, grid, vmap):
+def ensure_group_policy(policy, nodes, vmap):
     o = []
     for v in vmap:
-        for p in policy:
-            item, op, val = cond
-            check = in_grid
-            if item.startswith("!"):
-                item = item[1:]
-                check = cf_(not_, in_grid)
-            lhs = Sum([If(vmap[v][g], 1, 0) for g in grid if check(item, g)])
-    o.append(And(expr(op, lhs, int(val))))
-    return o
-    return [
-        And(
-            AtLeast(*[vmap[v][g] for g in grid], 1),
-            Sum(
-                [
-                    If(in_grid("평일10시", g), 0.5, 1) * If(vmap[v][g], 1, 0)
-                    for g in grid
-                ]
+        for _, p in policy:
+            key, op, val = p
+            check = key_in_node
+            if key.startswith("!"):
+                key = key[1:]
+                check = cf_(not_, key_in_node)
+            lhs = Sum([If(vmap[v][n], 1, 0) for n in nodes if check(key, n)])
+            o.append(
+                And(
+                    AtLeast(*[vmap[v][n] for n in nodes], 1),
+                    expr(op, lhs, int(val)),
+                )
             )
-            <= 3,
-        )
-        for v in vmap
-    ]
+    return o
 
 
 def sort_(x):
@@ -220,29 +226,28 @@ def sort_(x):
         return x
 
 
-def res_by_var(model, grid, vmap):
-    return {v: sort_([g for g in grid if model.eval(vmap[v][g])]) for v in vmap}
+def res_by_var(model, nodes, vmap):
+    return {v: sort_([n for n in nodes if model.eval(vmap[v][n])]) for v in vmap}
 
 
-def res_by_domain(model, grid, vmap):
-    return sort_({g: fst(v for v in vmap if model.eval(vmap[v][g])) for g in grid})
+def res_by_domain(model, nodes, vmap):
+    return sort_({n: fst(v for v in vmap if model.eval(vmap[v][n])) for n in nodes})
 
 
 def solve(f):
     domain, (constraints, policy) = second(from_angles, parse_lot(f))
-    grid, vmap = prepare(domain, constraints)
+    nodes, vmap = prepare(domain, constraints)
 
     opt = Optimize()
-    opt.add(shuffle(assertions(constraints, grid, vmap)))
-    opt.add(shuffle(ensure_nodup_populated(grid, vmap)))
-
-    opt.add(shuffle(ensure_group_policy(policy, grid, vmap)))
-    opt.add(shuffle(ensure_nodup_root(grid, vmap)))
+    opt.add(shuffle(assertions(constraints, nodes, vmap)))
+    opt.add(shuffle(ensure_nodup_populated(nodes, vmap)))
+    opt.add(shuffle(ensure_group_policy(policy, nodes, vmap)))
+    opt.add(shuffle(ensure_nodup_root(nodes, vmap)))
     if opt.check() == sat:
         model = opt.model()
         return dmap(
-            d=res_by_domain(model, grid, vmap),
-            v=res_by_var(model, grid, vmap),
+            d=res_by_domain(model, nodes, vmap),
+            v=res_by_var(model, nodes, vmap),
         )
     else:
         error("Error, No solution found")
