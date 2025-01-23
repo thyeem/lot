@@ -93,12 +93,12 @@ def char(c):
     return charby(_ == c, expect=c)
 
 
-def anychar():
+def anychar(s):
     """
-    >>> anychar()("sofia")
+    >>> anychar("sofia")
     ('s', 'ofia')
     """
-    return charby(const(True), expect="anycharacter")
+    return charby(const(True), expect="anycharacter")(s)
 
 
 def anycharbut(c):
@@ -117,12 +117,12 @@ def noneof(cs):
     return charby(lambda x: x not in cs, expect=f"none of {cs}")
 
 
-def digit():
-    return oneof("0123456789")
+def digit(s):
+    return oneof("0123456789")(s)
 
 
-def digits():
-    return some(digit(), fold=True)
+def digits(s):
+    return some(digit, fold=True)(s)
 
 
 def string(cs):
@@ -141,50 +141,76 @@ def string(cs):
     return parse
 
 
-def anystring():
+def anystring(s):
     """
-    >>> anystring()("sofiamaria")
+    >>> anystring("sofiamaria")
     ('sofiamaria', '')
     """
-    return many(anychar(), fold=True)
+    return many(anychar, fold=True)(s)
 
 
 def anystringbut(cs):
     def parse(s):
         o = []
         while s and not s.startswith(cs):
-            r, s = anychar()(s)
+            r, s = anychar(s)
             o.append(r)
         return unchars(o), s
 
     return parse
 
 
-def whitespace():
-    return choice(char(" "), char("\n"), char("\t"))
+def parens(parser):
+    return between(
+        token(string("(")),
+        token(string(")")),
+        parser,
+    )
 
 
-def comment():
-    def parse(s):
-        _, s = char("#")(s)
-        r, s = anystringbut("\n")(s)
-        return r, s
+def squares(parser):
+    return between(
+        token(string("[")),
+        token(string("]")),
+        parser,
+    )
 
-    return parse
+
+def braces(parser):
+    return between(
+        token(string("{")),
+        token(string("}")),
+        parser,
+    )
 
 
-def jump():
-    def parse(s):
-        _, s = many(choice(whitespace(), comment()), fold=True)(s)
-        return None, s
+def angles(parser):
+    return between(
+        token(string("<")),
+        token(string(">")),
+        parser,
+    )
 
-    return parse
+
+def whitespace(s):
+    return choice(char(" "), char("\n"), char("\t"))(s)
+
+
+def comment(s):
+    _, s = char("#")(s)
+    r, s = anystringbut("\n")(s)
+    return r, s
+
+
+def jump(s):
+    _, s = many(choice(whitespace, comment), fold=True)(s)
+    return None, s
 
 
 def token(parser):
     def parse(s):
         r, s = parser(s)
-        _, s = jump()(s)
+        _, s = jump(s)
         return r, s
 
     return parse

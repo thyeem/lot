@@ -34,4 +34,4 @@ dist/
 .env/
 
 # custom
-*.lot
+*.xls?
