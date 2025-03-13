@@ -4,6 +4,8 @@ from foc import *
 
 from lot.lot import *
 
+__version__ = "0.1.0"
+
 
 class _help_formatter(argparse.HelpFormatter):
     def __init__(self, prog):
@@ -14,7 +16,6 @@ class _help_formatter(argparse.HelpFormatter):
 
 
 def main():
-    __version__ = "0.1.0"
 
     parser = argparse.ArgumentParser(
         prog="lot",

@@ -1,2 +1,4 @@
 ortools
 openpyxl
+foc
+ouch
