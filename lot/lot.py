@@ -177,8 +177,11 @@ def solve(args):
         set_objective(model, vars, coeffs, consts)
         if solver.solve(model) in (cp_model.FEASIBLE, cp_model.OPTIMAL):
             o = collect_results(solver, vars, coeffs, consts)
-            report_and_export(consts, o, args)
-            break
+            if valid_results(consts, o):
+                report_and_export(consts, o, args)
+                break
+            else:
+                continue
         if it > max_it:
             print("Error, maximum iterations reached: Aborting.")
             return
@@ -226,6 +229,13 @@ def expr(sym, lhs, rhs):
         {"<": op.lt, "<=": op.le, "=": op.eq, ">": op.gt, ">=": op.ge}.get(sym)
         or error(f"Error, no such operator provided: {sym}")
     )(lhs, rhs)
+
+
+def valid_results(consts, o):
+    for actor in consts["actors"]:
+        if not len([node for node in o["actors"][actor]]):
+            return False
+    return True
 
 
 def validate_policy(grid, policy):
@@ -349,6 +359,9 @@ def report_and_export(consts, o, args):
     def jx(node):
         return ":".join(node)
 
+    def cut(x):
+        return x.split()[0][:4]
+
     def uni(s):
         return sum(2 if east_asian_width(c) in {"W", "F"} else 1 for c in s)
 
@@ -371,7 +384,7 @@ def report_and_export(consts, o, args):
         days = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"]
         events = defaultdict(list)
         for node in consts["nodes"]:
-            events[int(fst(node))].append(f"{last(node)}:{o['nodes'][node][:4]}")
+            events[int(fst(node))].append(f"{last(node)}:{cut(o['nodes'][node])}")
         return cal, days, events, year, month
 
     def to_cal():
