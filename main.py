@@ -70,11 +70,18 @@ def main():
         help="Save to spreadsheet FILE",
     )
     parser.add_argument(
-        "-u",
-        "--ubound",
+        "-A",
+        "--max-acts",
         type=int,
         metavar="INT",
-        help="Set upper limit of acts",
+        help="Set maximum number of acts",
+    )
+    parser.add_argument(
+        "-R",
+        "--min-rest",
+        type=int,
+        metavar="INT",
+        help="Set minimum number of rest",
     )
     parser.add_argument(
         "-v", "--verbose", action="store_true", help="Increase verbosity"

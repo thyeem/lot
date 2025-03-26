@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import datetime
 from unicodedata import east_asian_width
 
+import numpy as np
 import openpyxl
 from foc import *
 from openpyxl.styles import PatternFill
@@ -43,18 +44,22 @@ def parse_bar(s):
 
 def parse_policy(s):
     def acts(s):
-        _, s = token(char("@"))(s)
+        a, s = token(char("@"))(s)
         r, s = token(digits)(s)
-        return r, s
+        return (a, r), s
+
+    def rest(s):
+        a, s = token(char("/"))(s)
+        r, s = token(digits)(s)
+        return (a, r), s
 
     def unit(s):
         v, s = token(
             angles(token(some(noneof("<>"), fold=True))),
         )(s)
-        n, s = option("", acts)(s)
-        r, s = many(choice(parse_x, parse_o))(s)
-        if n:
-            r.append(("@", n))
+        a, s = many(choice(acts, rest))(s)
+        r, s = many(choice(parse_x, parse_o, parse_gt, parse_lt))(s)
+        r.extend(a)
         return (v, r), s
 
     try:
@@ -85,6 +90,30 @@ def parse_o(s):
         return (o.lower(), concatmapl(unfold, r)), s
     except:
         error(f"Error, failed to parse 'O': {s[:64]}")
+
+
+def parse_gt(s):
+    try:
+        _, s = token(char("-"))(s)
+        a, s = token(char(">"))(s)
+        r, s = token(
+            squares(sepby(token(char(",")), xkwd)),
+        )(s)
+        return (a, concatmapl(unfold, r)), s
+    except:
+        error(f"Error, failed to parse '>': {s[:64]}")
+
+
+def parse_lt(s):
+    try:
+        _, s = token(char("-"))(s)
+        a, s = token(char("<"))(s)
+        r, s = token(
+            squares(sepby(token(char(",")), xkwd)),
+        )(s)
+        return (a, concatmapl(unfold, r)), s
+    except:
+        error(f"Error, failed to parse '<': {s[:64]}")
 
 
 def kwd_list(s):
@@ -156,14 +185,19 @@ def unfold(q):
 def solve(args):
     grid, policy = parse_lot(args.FILE)
     validate_policy(grid, policy)
+    nodes = gen_nodes(grid)
+    rmap = gen_rmap(nodes)
+    actors = policy.keys()
+    rest = {actor: args.min_rest or 0 for actor in actors}
     consts = dict(
         grid=grid,
         policy=policy,
-        nodes=gen_nodes(grid),
-        actors=policy.keys(),
+        nodes=nodes,
+        actors=actors,
+        rmap=rmap,
+        rest=rest,
     )
-    ub = args.ubound or len(consts["nodes"]) // len(consts["policy"]) or 1
-    max_it = 10
+    max_acts = args.max_acts or len(nodes) // len(actors) or 1
     it = 0
     while True:
         model = cp_model.CpModel()
@@ -171,7 +205,8 @@ def solve(args):
         coeffs = process_policy(model, vars, consts)
         rule_single_actor_per_node(model, vars, consts)
         rule_at_most_one_act_per_root(model, vars, consts)
-        rule_clip_act_per_actor(model, vars, consts, ub)
+        rule_clip_act_per_actor(model, vars, consts, max_acts)
+        rule_rest_between_acts(model, vars, consts)
 
         solver = cp_model.CpSolver()
         set_objective(model, vars, coeffs, consts)
@@ -182,16 +217,16 @@ def solve(args):
                 break
             else:
                 continue
-        if it > max_it:
+        if it > 10:
             print("Error, maximum iterations reached: Aborting.")
             return
-        ub += 1
+        max_acts += 1
         it += 1
         if args.verbose:
-            print(f"Warning, not found feasible, set ub={ub}.")
+            print(f"Warning, not found feasible, set max_acts={max_acts}.")
     if args.verbose:
         print()
-        print(justf("number of acts\t", 20, ">"), f"{ub}")
+        print(justf("number of acts\t", 20, ">"), f"{max_acts}")
         print(justf("conflicts\t", 20, ">"), f"{solver.num_conflicts}")
         print(justf("branches\t", 20, ">"), f"{solver.num_branches}")
         print(justf("wall time\t", 20, ">"), f"{solver.wall_time:4f} s")
@@ -199,6 +234,17 @@ def solve(args):
 
 def gen_nodes(grid):
     return cf_(dsort, concat)(cartprod(*g) for g in grid)
+
+
+def gen_rmap(nodes):
+    rmap = {}
+    for node in nodes:
+        r = fst(node)
+        if r in rmap:
+            rmap[r].append(node)
+        else:
+            rmap[r] = [node]
+    return rmap
 
 
 def gen_vars(model, consts):
@@ -243,7 +289,7 @@ def validate_policy(grid, policy):
     found = []
     for actor, prefs in policy.items():
         d = read_prefs(prefs)
-        for k in flat(d["o"], d["x"]):
+        for k in flat(d["o"], d["x"], d[">"]):
             if k not in keys:
                 found.append((k, actor))
     if found:
@@ -257,11 +303,14 @@ def process_policy(model, vars, consts):
     coeffs = {}
     for actor, prefs in consts["policy"].items():
         d = read_prefs(prefs)
-        # process @-acts if any
+        # process @acts if any
         if d["@"]:
             model.add(
                 sum(vars[(actor, *node)] for node in consts["nodes"]) == d["@"],
             )
+        # update /rest if any
+        if not isinstance(d["/"], list):
+            consts["rest"][actor] = d["/"]
         # process q-preference
         for key, sym, val in d["q"]:
             lhs = sum(
@@ -270,14 +319,29 @@ def process_policy(model, vars, consts):
                 if match_node([key], node)
             )
             model.add(expr(sym, lhs, int(val)))
+        # process o/x preference
         for node in consts["nodes"]:
             act = (actor, *node)
-            # process o-preference
             coeffs[act] = 1 if not d["o"] or match_node(d["o"], node) else 0
-            # process x-preference
             if match_node(d["x"], node):
                 model.add(vars[act] == 0)
+        # update priority
+        if d[">"]:
+            precedence = zipl(d[">"], w_priority(len(d[">"])))
+            for node in consts["nodes"]:
+                act = (actor, *node)
+                if coeffs[act]:
+                    for item, w in precedence:
+                        if set(item).issubset(set(node)):
+                            coeffs[act] += w
     return coeffs
+
+
+def w_priority(n):
+    x = np.exp(np.arange(1, 1 + n))
+    x = x / np.linalg.norm(x)
+    x = x - np.mean(x)
+    return rev(x.tolist())
 
 
 def read_prefs(prefs):
@@ -291,9 +355,13 @@ def read_prefs(prefs):
                 else:
                     d["o"].append(item)
         elif sym == "x":
-            d["x"].extend(items)
-        elif sym == "@":
-            d["@"] = int(items)
+            d[sym].extend(items)
+        elif sym == ">":
+            d[sym] = items
+        elif sym == "<":
+            d[">"] = rev(items)
+        elif sym in ["@", "/"]:
+            d[sym] = int(items)
         else:
             error(f"Error, used illegal symbol: {sym}")
     return d
@@ -306,32 +374,44 @@ def rule_single_actor_per_node(model, vars, consts):
 
 def rule_at_most_one_act_per_root(model, vars, consts):
     root = cf_(uniq, fst, zip)(*consts["nodes"])
-    rmap = {}
-    for node in consts["nodes"]:
-        r = fst(node)
-        if r in rmap:
-            rmap[r].append(node)
-        else:
-            rmap[r] = [node]
     for actor in consts["actors"]:
         for r in root:
-            model.add(sum(vars[(actor, *node)] for node in rmap[r]) <= 1)
+            model.add(sum(vars[(actor, *node)] for node in consts["rmap"][r]) <= 1)
 
 
-def rule_clip_act_per_actor(model, vars, consts, ub):
+def rule_clip_act_per_actor(model, vars, consts, max_acts):
     for actor in consts["actors"]:
         acts = []
         for node in consts["nodes"]:
             act = (actor, *node)
             acts.append(vars[act])
         model.add(1 <= sum(acts))  # assign at least once per actor
-        model.add(sum(acts) <= ub)
+        model.add(sum(acts) <= max_acts)
+
+
+def rule_rest_between_acts(model, vars, consts):
+    root = cf_(uniq, fst, zip)(*consts["nodes"])
+    for actor in consts["actors"]:
+        min_rest = consts["rest"][actor]
+        if not min_rest:
+            continue
+        for i, r in enumerate(root[:-min_rest]):
+            sched = model.new_bool_var(f"sched_{actor}_{r}")
+            model.add_bool_or(
+                [vars[(actor, *node)] for node in consts["rmap"][r]]
+            ).only_enforce_if(sched)
+            model.add_bool_and(
+                [vars[(actor, *node)].Not() for node in consts["rmap"][r]]
+            ).only_enforce_if(sched.Not())
+            for r_ in root[i + 1 : i + 1 + min_rest]:
+                for node in consts["rmap"][r_]:
+                    model.add(vars[(actor, *node)] == 0).only_enforce_if(sched)
 
 
 def set_objective(model, vars, coeffs, consts):
     model.maximize(
         sum(
-            (coeffs[(actor, *node)] + rand(0.1)) * vars[(actor, *node)]
+            (coeffs[(actor, *node)] + rand(0.2)) * vars[(actor, *node)]
             for actor in consts["actors"]
             for node in consts["nodes"]
         )
