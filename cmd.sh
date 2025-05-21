@@ -1,12 +1,13 @@
 #!/bin/sh
 
-mkdir -p $HOME/.local/bin
+: ${BIN:=$HOME/.local/bin/lot}
+: ${LM:=$HOME/lot}
+: ${PY:=$LM/.venv/bin/python}
 
-cat > $HOME/.local/bin/lot <<EOF
+mkdir -p $(dirname $BIN)
+cat <<EOF > $BIN
 #!/bin/sh
-
-python $(pwd -P)/main.py "\$@"
-
+$PY $LM/main.py "\$@"
 EOF
 
-chmod +x $HOME/.local/bin/lot
+chmod +x $BIN

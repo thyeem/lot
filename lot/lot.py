@@ -1,10 +1,10 @@
 import calendar
+import math
 import re
 from collections import defaultdict
 from datetime import datetime
 from unicodedata import east_asian_width
 
-import numpy as np
 import openpyxl
 from foc import *
 from openpyxl.styles import PatternFill
@@ -333,15 +333,14 @@ def process_policy(model, vars, consts):
                 if coeffs[act]:
                     for item, w in precedence:
                         if set(item).issubset(set(node)):
-                            coeffs[act] += w
+                            if coeffs[act]:
+                                coeffs[act] += w
     return coeffs
 
 
 def w_priority(n):
-    x = np.exp(np.arange(1, 1 + n))
-    x = x / np.linalg.norm(x)
-    x = x - np.mean(x)
-    return rev(x.tolist())
+    norm = 1 / math.sqrt(n)
+    return [-math.log10(i / int(n)) * norm for i in seq(1, n)]
 
 
 def read_prefs(prefs):
@@ -409,13 +408,34 @@ def rule_rest_between_acts(model, vars, consts):
 
 
 def set_objective(model, vars, coeffs, consts):
+    def add_noise(x):
+        return x + rand(0.05) if x else x
+
+    penalty = penalize_low_entropy(model, vars, consts)
     model.maximize(
         sum(
-            (coeffs[(actor, *node)] + rand(0.2)) * vars[(actor, *node)]
+            add_noise(coeffs[(actor, *node)]) * vars[(actor, *node)]
             for actor in consts["actors"]
             for node in consts["nodes"]
         )
+        - penalty
     )
+
+
+def penalize_low_entropy(model, vars, consts):
+    penalties = []
+    el = defaultdict(list)
+    for node in consts["nodes"]:
+        for e in node:
+            el[e].append(node)
+    el = {k: v for k, v in el.items() if len(v) > 1}
+    for actor in consts["actors"]:
+        for _, nodes in el.items():
+            el_vars = [vars[(actor, *node)] for node in nodes]
+            penalty = model.new_int_var(0, len(el_vars) - 1, "")
+            model.add(penalty >= sum(el_vars) - 1)
+            penalties.append(penalty)
+    return 0.1 * sum(penalties)
 
 
 def collect_results(solver, vars, coeffs, consts):
