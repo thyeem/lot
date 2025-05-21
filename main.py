@@ -71,10 +71,10 @@ def main():
     )
     parser.add_argument(
         "-A",
-        "--max-acts",
+        "--max-it",
         type=int,
         metavar="INT",
-        help="Set maximum number of acts",
+        help="Set maximum number of iteration",
     )
     parser.add_argument(
         "-R",
@@ -82,9 +82,6 @@ def main():
         type=int,
         metavar="INT",
         help="Set minimum number of rest",
-    )
-    parser.add_argument(
-        "-v", "--verbose", action="store_true", help="Increase verbosity"
     )
     parser.add_argument(
         "-V",

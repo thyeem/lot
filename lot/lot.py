@@ -15,7 +15,7 @@ from .parser import *
 
 
 # ----------------------
-# parse LoT source code
+# parse LOT source code
 # ----------------------
 def parse_lot(f):
     _, s = jump(reader(f).read())
@@ -23,7 +23,7 @@ def parse_lot(f):
     _, s = parse_bar(s)
     a, s = parse_policy(s)
     if s:
-        error(f"Error, incomplete parsing: {s[:64]}")
+        error(f"Error, parsing failed at:\n\n{s[:64]}")
     return g, dict(a)  # (grid, policy)
 
 
@@ -39,7 +39,7 @@ def parse_bar(s):
         _, s = jump(s)
         return None, s
     except:
-        error(f"Error, failed to parse bar: {s[:64]}")
+        error(f"Error, bar (---) parsing failed at:\n\n{s[:64]}")
 
 
 def parse_policy(s):
@@ -58,14 +58,14 @@ def parse_policy(s):
             angles(token(some(noneof("<>"), fold=True))),
         )(s)
         a, s = many(choice(acts, rest))(s)
-        r, s = many(choice(parse_x, parse_o, parse_gt, parse_lt))(s)
+        r, s = many(choice(parse_x, parse_o, parse_excl))(s)
         r.extend(a)
         return (v, r), s
 
     try:
         return some(unit)(s)
     except:
-        error(f"Error, failed to parse policy: {s[:64]}")
+        error(f"Error, policy parsing failed at:\n\n{s[:64]}")
 
 
 def parse_x(s):
@@ -77,7 +77,7 @@ def parse_x(s):
         )(s)
         return (x.lower(), concatmapl(unfold, r)), s
     except:
-        error(f"Error, failed to parse 'X': {s[:64]}")
+        error(f"Error, 'X' parsing failed at:\n\n{s[:64]}")
 
 
 def parse_o(s):
@@ -89,31 +89,19 @@ def parse_o(s):
         )(s)
         return (o.lower(), concatmapl(unfold, r)), s
     except:
-        error(f"Error, failed to parse 'O': {s[:64]}")
+        error(f"Error, 'O' parsing failed at:\n\n{s[:64]}")
 
 
-def parse_gt(s):
+def parse_excl(s):
     try:
         _, s = token(char("-"))(s)
-        a, s = token(char(">"))(s)
+        a, s = token(char("!"))(s)
         r, s = token(
             squares(sepby(token(char(",")), xkwd)),
         )(s)
         return (a, concatmapl(unfold, r)), s
     except:
-        error(f"Error, failed to parse '>': {s[:64]}")
-
-
-def parse_lt(s):
-    try:
-        _, s = token(char("-"))(s)
-        a, s = token(char("<"))(s)
-        r, s = token(
-            squares(sepby(token(char(",")), xkwd)),
-        )(s)
-        return (a, concatmapl(unfold, r)), s
-    except:
-        error(f"Error, failed to parse '<': {s[:64]}")
+        error(f"Error, '!' parsing failed at:\n\n{s[:64]}")
 
 
 def kwd_list(s):
@@ -127,7 +115,7 @@ def kwd_tuple(s):
 
 
 def kwd(s):
-    return token(some(noneof("#[]<=>(),:+ \n\t"), fold=True))(s)
+    return token(some(noneof("#[]!<=>(),:+ \n\t"), fold=True))(s)
 
 
 def xkwd(s):
@@ -170,7 +158,7 @@ def unfold(q):
 
 
 # ---------------------------------------------------------------------
-#        LoT | grid + --- + policy
+#        LOT | grid + --- + policy
 # ---------------------------------------------------------------------
 #      nodes | cartprod(grid)            ;; junctions of grid
 #     policy | { actor: [preference] }   ;; actor's requests
@@ -197,7 +185,8 @@ def solve(args):
         rmap=rmap,
         rest=rest,
     )
-    max_acts = args.max_acts or len(nodes) // len(actors) or 1
+    max_acts = len(nodes) // len(actors) or 1
+    max_it = args.max_it or 5
     it = 0
     while True:
         model = cp_model.CpModel()
@@ -205,7 +194,7 @@ def solve(args):
         coeffs = process_policy(model, vars, consts)
         rule_single_actor_per_node(model, vars, consts)
         rule_at_most_one_act_per_root(model, vars, consts)
-        rule_clip_act_per_actor(model, vars, consts, max_acts)
+        rule_clip_acts_per_actor(model, vars, consts, max_acts)
         rule_rest_between_acts(model, vars, consts)
 
         solver = cp_model.CpSolver()
@@ -217,19 +206,10 @@ def solve(args):
                 break
             else:
                 continue
-        if it > 10:
-            print("Error, maximum iterations reached: Aborting.")
-            return
+        if it > max_it:
+            error(f"Error, maximum iterations({max_it}) reached: Aborting.")
         max_acts += 1
         it += 1
-        if args.verbose:
-            print(f"Warning, not found feasible, set max_acts={max_acts}.")
-    if args.verbose:
-        print()
-        print(justf("number of acts\t", 20, ">"), f"{max_acts}")
-        print(justf("conflicts\t", 20, ">"), f"{solver.num_conflicts}")
-        print(justf("branches\t", 20, ">"), f"{solver.num_branches}")
-        print(justf("wall time\t", 20, ">"), f"{solver.wall_time:4f} s")
 
 
 def gen_nodes(grid):
@@ -257,7 +237,7 @@ def gen_vars(model, consts):
 
 
 def match_node(prefs, node):
-    return any(set(item).issubset(set(node)) for item in prefs)
+    return any(set(o).issubset(set(node)) for o in prefs)
 
 
 def dsort(x):
@@ -289,7 +269,7 @@ def validate_policy(grid, policy):
     found = []
     for actor, prefs in policy.items():
         d = read_prefs(prefs)
-        for k in flat(d["o"], d["x"], d[">"]):
+        for k in flat(d["o"], d["x"], d["!"]):
             if k not in keys:
                 found.append((k, actor))
     if found:
@@ -322,45 +302,44 @@ def process_policy(model, vars, consts):
         # process o/x preference
         for node in consts["nodes"]:
             act = (actor, *node)
-            coeffs[act] = 1 if not d["o"] or match_node(d["o"], node) else 0
+            coeffs[act] = 1 if not d["o"] or match_node(d["o"], node) else -0.2
             if match_node(d["x"], node):
                 model.add(vars[act] == 0)
         # update priority
-        if d[">"]:
-            precedence = zipl(d[">"], w_priority(len(d[">"])))
-            for node in consts["nodes"]:
-                act = (actor, *node)
-                if coeffs[act]:
-                    for item, w in precedence:
-                        if set(item).issubset(set(node)):
-                            if coeffs[act]:
-                                coeffs[act] += w
+        if d["!"]:
+            precedence = zipl(d["!"], w_priority(len(d["!"])))
+            for el, w in precedence:
+                for node in consts["nodes"]:
+                    if set(el).issubset(set(node)):
+                        act = (actor, *node)
+                        if coeffs[act] >= 1:
+                            coeffs[act] += w
     return coeffs
 
 
 def w_priority(n):
+    if n < 1:
+        return []
     norm = 1 / math.sqrt(n)
     return [-math.log10(i / int(n)) * norm for i in seq(1, n)]
 
 
 def read_prefs(prefs):
     d = defaultdict(list)
-    for sym, items in prefs:
+    for sym, o in prefs:
         if sym == "o":
-            for item in items:
-                if fst(item) == "#":
-                    d["o"].append(fst(snd(item)))
-                    d["q"].append(snd(item))
+            for el in o:
+                if fst(el) == "#":
+                    d["o"].append(fst(snd(el)))
+                    d["q"].append(snd(el))
                 else:
-                    d["o"].append(item)
+                    d["o"].append(el)
         elif sym == "x":
-            d[sym].extend(items)
-        elif sym == ">":
-            d[sym] = items
-        elif sym == "<":
-            d[">"] = rev(items)
+            d[sym].extend(o)
+        elif sym == "!":
+            d[sym] = o
         elif sym in ["@", "/"]:
-            d[sym] = int(items)
+            d[sym] = int(o)
         else:
             error(f"Error, used illegal symbol: {sym}")
     return d
@@ -378,7 +357,7 @@ def rule_at_most_one_act_per_root(model, vars, consts):
             model.add(sum(vars[(actor, *node)] for node in consts["rmap"][r]) <= 1)
 
 
-def rule_clip_act_per_actor(model, vars, consts, max_acts):
+def rule_clip_acts_per_actor(model, vars, consts, max_acts):
     for actor in consts["actors"]:
         acts = []
         for node in consts["nodes"]:
@@ -409,33 +388,48 @@ def rule_rest_between_acts(model, vars, consts):
 
 def set_objective(model, vars, coeffs, consts):
     def add_noise(x):
-        return x + rand(0.05) if x else x
+        return x + rand(0.05) if x >= 1 else x
 
-    penalty = penalize_low_entropy(model, vars, consts)
+    penalty_entropy = penalize_low_entropy(model, vars, consts)
+    penalty_sigma = penalize_high_sigma(model, vars, consts)
     model.maximize(
         sum(
             add_noise(coeffs[(actor, *node)]) * vars[(actor, *node)]
             for actor in consts["actors"]
             for node in consts["nodes"]
         )
-        - penalty
+        - penalty_entropy
+        - penalty_sigma
     )
 
 
 def penalize_low_entropy(model, vars, consts):
     penalties = []
-    el = defaultdict(list)
+    d = defaultdict(list)
     for node in consts["nodes"]:
         for e in node:
-            el[e].append(node)
-    el = {k: v for k, v in el.items() if len(v) > 1}
+            d[e].append(node)
+    d = {k: v for k, v in d.items() if len(v) > 1}
     for actor in consts["actors"]:
-        for _, nodes in el.items():
+        for _, nodes in d.items():
             el_vars = [vars[(actor, *node)] for node in nodes]
             penalty = model.new_int_var(0, len(el_vars) - 1, "")
             model.add(penalty >= sum(el_vars) - 1)
             penalties.append(penalty)
-    return 0.1 * sum(penalties)
+    return 0.2 * sum(penalties)
+
+
+def penalize_high_sigma(model, vars, consts):
+    penalties = []
+    num_nodes = len(consts["nodes"])
+    for actor in consts["actors"]:
+        penalty = model.new_int_var(0, num_nodes**2, "")
+        sum_acts = model.new_int_var(0, num_nodes, "")
+        acts = [vars[(actor, *node)] for node in consts["nodes"]]
+        model.add(sum_acts == sum(acts))
+        model.add_multiplication_equality(penalty, [sum_acts, sum_acts])
+        penalties.append(penalty)
+    return 0.2 * sum(penalties)
 
 
 def collect_results(solver, vars, coeffs, consts):
@@ -444,7 +438,7 @@ def collect_results(solver, vars, coeffs, consts):
         for node in consts["nodes"]:
             act = (actor, *node)
             if solver.value(vars[act]) == 1:
-                if coeffs[act]:
+                if coeffs[act] >= 1:
                     o["nodes"][node] = actor
                     o["actors"][actor].append(node)
                 else:

@@ -20,8 +20,7 @@ options:
   -y INT, --year INT      Set the year
   -m INT, --month INT     Set the month
   -o FILE, --output FILE  Save to spreadsheet FILE
-  -A INT, --max-acts INT  Set maximum number of acts
+  -A INT, --max-it INT    Set maximum number of iteration
   -R INT, --min-rest INT  Set minimum number of rest
-  -v, --verbose           Increase verbosity
   -V, --version           Show version information
 ```
