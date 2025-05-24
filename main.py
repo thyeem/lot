@@ -40,13 +40,13 @@ def main():
         "-a",
         "--actor",
         action="store_true",
-        help="Print with actors as key",
+        help="Print sorted by actor",
     )
     parser.add_argument(
         "-n",
         "--node",
         action="store_true",
-        help="Print with nodes as key",
+        help="Print sorted by node",
     )
     parser.add_argument(
         "-y",
@@ -67,7 +67,7 @@ def main():
         "--output",
         type=str,
         metavar="FILE",
-        help="Save to spreadsheet FILE",
+        help="Save as spreadsheet FILE",
     )
     parser.add_argument(
         "-A",
