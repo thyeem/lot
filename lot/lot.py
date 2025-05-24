@@ -13,95 +13,97 @@ from ouch import *
 
 from .parser import *
 
+TEMPERATURE = 0.1
+PENALTY_ENTROPY = 0.5
+PENALTY_SIGMA = 0.5
+
 
 # ----------------------
 # parse LOT source code
 # ----------------------
-def parse_lot(f):
-    _, s = jump(reader(f).read())
+def parse_lot(s):
+    _, s = jump(s)
     g, s = parse_grid(s)
     _, s = parse_bar(s)
     a, s = parse_policy(s)
     if s:
-        error(f"Error, parsing failed at:\n\n{s[:64]}")
-    return g, dict(a)  # (grid, policy)
+        fail("Syntax Error: Invalid syntax used", s)
+    return (g, dict(a)), s  # (grid, policy)
 
 
 def parse_grid(s):
-    return sepby(token(string("+")), many(kwd_list))(s)
+    try:
+        g, s = sepby(token(string("+")), many(kwd_list))(s)
+        _, s = jump(s)
+        return g, s
+    except:
+        fail("Syntax Error: Invalid syntax used", s)
 
 
 def parse_bar(s):
     try:
-        _, s = char("-")(s)
-        _, s = char("-")(s)
-        _, s = some(char("-"))(s)
+        _, s = atleast(3, char("-"))(s)
         _, s = jump(s)
         return None, s
-    except:
-        error(f"Error, bar (---) parsing failed at:\n\n{s[:64]}")
+    except ParseError:
+        fail("Syntax Error: Invalid syntax used", s)
 
 
 def parse_policy(s):
     def acts(s):
         a, s = token(char("@"))(s)
         r, s = token(digits)(s)
-        return (a, r), s
+        _, s = jump(s)
+        return (a, r), s  # (@, digits)
 
     def rest(s):
         a, s = token(char("/"))(s)
         r, s = token(digits)(s)
-        return (a, r), s
+        _, s = jump(s)
+        return (a, r), s  # (/, digits)
+
+    def actor(s):
+        return token(some(noneof("#<>"), fold=True))(s)
 
     def unit(s):
-        v, s = token(
-            angles(token(some(noneof("<>"), fold=True))),
-        )(s)
-        a, s = many(choice(acts, rest))(s)
+        a, s = token(angles(actor))(s)
+        _, s = jump(s)
+        q, s = many(choice(acts, rest))(s)
         r, s = many(choice(parse_x, parse_o, parse_excl))(s)
-        r.extend(a)
-        return (v, r), s
+        r.extend(q)
+        return (a, r), s  # (actor, preferences)
 
-    try:
-        return some(unit)(s)
-    except:
-        error(f"Error, policy parsing failed at:\n\n{s[:64]}")
+    return some(unit)(s)
 
 
 def parse_x(s):
-    try:
-        _, s = token(char("-"))(s)
-        x, s = token(oneof("xX"))(s)
-        r, s = token(
-            squares(sepby(token(char(",")), xkwd)),
-        )(s)
-        return (x.lower(), concatmapl(unfold, r)), s
-    except:
-        error(f"Error, 'X' parsing failed at:\n\n{s[:64]}")
+    _, s = token(char("-"))(s)
+    x, s = token(oneof("xX"))(s)
+    r, s = token(
+        squares(sepby(token(char(",")), xkwd)),
+    )(s)
+    _, s = jump(s)
+    return (x.lower(), concatmapl(unfold, r)), s  # (x, [xkwd,...])
 
 
 def parse_o(s):
-    try:
-        _, s = token(char("-"))(s)
-        o, s = token(oneof("oO"))(s)
-        r, s = token(
-            squares(sepby(token(char(",")), choice(qbound, xkwd))),
-        )(s)
-        return (o.lower(), concatmapl(unfold, r)), s
-    except:
-        error(f"Error, 'O' parsing failed at:\n\n{s[:64]}")
+    _, s = token(char("-"))(s)
+    o, s = token(oneof("oO"))(s)
+    r, s = token(
+        squares(sepby(token(char(",")), choice(qbound, xkwd))),
+    )(s)
+    _, s = jump(s)
+    return (o.lower(), concatmapl(unfold, r)), s  # (o, [xkwd,...])
 
 
 def parse_excl(s):
-    try:
-        _, s = token(char("-"))(s)
-        a, s = token(char("!"))(s)
-        r, s = token(
-            squares(sepby(token(char(",")), xkwd)),
-        )(s)
-        return (a, concatmapl(unfold, r)), s
-    except:
-        error(f"Error, '!' parsing failed at:\n\n{s[:64]}")
+    _, s = token(char("-"))(s)
+    a, s = token(char("!"))(s)
+    r, s = token(
+        squares(sepby(token(char(",")), xkwd)),
+    )(s)
+    _, s = jump(s)
+    return (a, concatmapl(unfold, r)), s  # (!, [xkwd,...])
 
 
 def kwd_list(s):
@@ -171,7 +173,8 @@ def unfold(q):
 
 
 def solve(args):
-    grid, policy = parse_lot(args.FILE)
+    s = reader(args.FILE).read()
+    grid, policy = run_parser(parse_lot, s)
     validate_policy(grid, policy)
     nodes = gen_nodes(grid)
     rmap = gen_rmap(nodes)
@@ -302,7 +305,7 @@ def process_policy(model, vars, consts):
         # process o/x preference
         for node in consts["nodes"]:
             act = (actor, *node)
-            coeffs[act] = 1 if not d["o"] or match_node(d["o"], node) else -0.2
+            coeffs[act] = 1 if not d["o"] or match_node(d["o"], node) else 0
             if match_node(d["x"], node):
                 model.add(vars[act] == 0)
         # update priority
@@ -312,7 +315,7 @@ def process_policy(model, vars, consts):
                 for node in consts["nodes"]:
                     if set(el).issubset(set(node)):
                         act = (actor, *node)
-                        if coeffs[act] >= 1:
+                        if coeffs[act]:
                             coeffs[act] += w
     return coeffs
 
@@ -388,7 +391,7 @@ def rule_rest_between_acts(model, vars, consts):
 
 def set_objective(model, vars, coeffs, consts):
     def add_noise(x):
-        return x + rand(0.05) if x >= 1 else x
+        return x + rand(TEMPERATURE) if x >= 1 else x
 
     penalty_entropy = penalize_low_entropy(model, vars, consts)
     penalty_sigma = penalize_high_sigma(model, vars, consts)
@@ -416,7 +419,7 @@ def penalize_low_entropy(model, vars, consts):
             penalty = model.new_int_var(0, len(el_vars) - 1, "")
             model.add(penalty >= sum(el_vars) - 1)
             penalties.append(penalty)
-    return 0.2 * sum(penalties)
+    return PENALTY_ENTROPY * sum(penalties)
 
 
 def penalize_high_sigma(model, vars, consts):
@@ -429,7 +432,7 @@ def penalize_high_sigma(model, vars, consts):
         model.add(sum_acts == sum(acts))
         model.add_multiplication_equality(penalty, [sum_acts, sum_acts])
         penalties.append(penalty)
-    return 0.2 * sum(penalties)
+    return PENALTY_SIGMA * sum(penalties)
 
 
 def collect_results(solver, vars, coeffs, consts):
@@ -438,7 +441,7 @@ def collect_results(solver, vars, coeffs, consts):
         for node in consts["nodes"]:
             act = (actor, *node)
             if solver.value(vars[act]) == 1:
-                if coeffs[act] >= 1:
+                if coeffs[act]:
                     o["nodes"][node] = actor
                     o["actors"][actor].append(node)
                 else:
