@@ -96,7 +96,12 @@ def main():
     if args.FILE is None:
         parser.print_help()
     else:
-        solve(args)
+        try:
+            solve(args)
+        except ParseError as e:
+            print(e)
+        except Exception as e:
+            print(e)
 
 
 if __name__ == "__main__":
