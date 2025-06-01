@@ -6,16 +6,17 @@ from datetime import datetime
 from unicodedata import east_asian_width
 
 import openpyxl
-from foc import *
-from openpyxl.styles import PatternFill
+from openpyxl.styles import Font, PatternFill
 from ortools.sat.python import cp_model
+
 from ouch import *
 
 from .parser import *
 
 TEMPERATURE = 0.1
-PENALTY_ENTROPY = 0.5
-PENALTY_SIGMA = 0.5
+PENALTY_ENTROPY = 0.2
+PENALTY_SIGMA = 0.2
+CUT_ACTOR_NAME = 4
 
 
 # ----------------------
@@ -32,38 +33,32 @@ def parse_lot(s):
 
 
 def parse_grid(s):
-    try:
-        g, s = sepby(token(string("+")), many(kwd_list))(s)
-        _, s = jump(s)
-        return g, s
-    except:
-        fail("Syntax Error: Invalid syntax used", s)
+    g, s = sepby(symbol("+"), some(kwd_list))(s)
+    _, s = jump(s)
+    return g, s
 
 
 def parse_bar(s):
-    try:
-        _, s = atleast(3, char("-"))(s)
-        _, s = jump(s)
-        return None, s
-    except ParseError:
-        fail("Syntax Error: Invalid syntax used", s)
+    _, s = atleast(3, char("-"))(s)
+    _, s = jump(s)
+    return None, s
 
 
 def parse_policy(s):
     def acts(s):
-        a, s = token(char("@"))(s)
+        a, s = symbol("@")(s)
         r, s = token(digits)(s)
         _, s = jump(s)
         return (a, r), s  # (@, digits)
 
     def rest(s):
-        a, s = token(char("/"))(s)
+        a, s = symbol("/")(s)
         r, s = token(digits)(s)
         _, s = jump(s)
         return (a, r), s  # (/, digits)
 
     def actor(s):
-        return token(some(noneof("#<>"), fold=True))(s)
+        return some(noneof("#<>\n"), fold=True)(s)
 
     def unit(s):
         a, s = token(angles(actor))(s)
@@ -77,59 +72,106 @@ def parse_policy(s):
 
 
 def parse_x(s):
-    _, s = token(char("-"))(s)
-    x, s = token(oneof("xX"))(s)
-    r, s = token(
-        squares(sepby(token(char(",")), xkwd)),
-    )(s)
-    _, s = jump(s)
-    return (x.lower(), concatmapl(unfold, r)), s  # (x, [xkwd,...])
+    _, s = symbol("-")(s)
+    _, s = choice(symbol("X"), symbol("x"))(s)
+    r, s = squares(sepby(symbol(","), xkwd))(s)
+    return ("x", normalize(r)), s  # (x, [xkwd,...])
 
 
 def parse_o(s):
-    _, s = token(char("-"))(s)
-    o, s = token(oneof("oO"))(s)
-    r, s = token(
-        squares(sepby(token(char(",")), choice(qbound, xkwd))),
-    )(s)
-    _, s = jump(s)
-    return (o.lower(), concatmapl(unfold, r)), s  # (o, [xkwd,...])
+    _, s = symbol("-")(s)
+    _, s = choice(symbol("O"), symbol("o"))(s)
+    r, s = squares(sepby(symbol(","), choice(rexpr, xkwd)))(s)
+    return ("o", normalize(r)), s  # (o, [xkwd,...])
 
 
 def parse_excl(s):
-    _, s = token(char("-"))(s)
-    a, s = token(char("!"))(s)
-    r, s = token(
-        squares(sepby(token(char(",")), xkwd)),
-    )(s)
-    _, s = jump(s)
-    return (a, concatmapl(unfold, r)), s  # (!, [xkwd,...])
-
-
-def kwd_list(s):
-    r, s = token(squares(sepby(token(char(",")), kwd)))(s)
-    return concatmapl(expand, r), s
-
-
-def kwd_tuple(s):
-    r, s = token(parens(sepby(token(char(",")), kwd)))(s)
-    return concatmapl(expand, r), s
+    _, s = symbol("-")(s)
+    _, s = symbol("!")(s)
+    r, s = squares(sepby(symbol(","), xkwd))(s)
+    return ("!", normalize(r)), s  # (!, [xkwd,...])
 
 
 def kwd(s):
-    return token(some(noneof("#[]!<=>(),:+ \n\t"), fold=True))(s)
+    """
+    >>> kwd("1-11;3")
+    (['1', '4', '7', '10'], '')
+
+    >>> kwd("keyword")
+    (['keyword'], '')
+    """
+    r, s = some(
+        label("'keyword-char'", noneof("[](),<=>:# \t\n")),
+        fold=True,
+    )(s)
+    x = expand(r)
+    if x:
+        return x, s
+    else:
+        fail("Invalid keyword expression", s)
+
+
+def kwd_list(s):
+    """
+    >>> kwd_list("[1-3, 4, 5-11;3]")
+    (['1', '2', '3', '4', '5', '8', '11'], '')
+    """
+    r, s = squares(sepby(symbol(","), strip(kwd)))(s)
+    return nub(flatten(r)), s
+
+
+def kwd_tuple(s):
+    """
+    >>> kwd_tuple("(1-3, 4, 5-11;3)")
+    (['1', '2', '3', '4', '5', '8', '11'], '')
+
+    >>> kwd_tuple("((1-3, 4, (5-11;3)))")
+    (['1', '2', '3', '4', '5', '8', '11'], '')
+    """
+    r, s = between(
+        char("("),
+        char(")"),
+        sepby(symbol(","), choice(strip(kwd_tuple), strip(kwd))),
+    )(s)
+    return nub(flatten(r)), s
 
 
 def xkwd(s):
-    return token(sepby(char(":"), choice(kwd_tuple, kwd)))(s)
+    """
+    >>> xkwd("sofia")
+    ([['sofia']], '')
+
+    >>> xkwd("(1-31;14):May:2025")
+    ([['1', '15', '29'], ['May'], ['2025']], '')
+
+    >>> xkwd("((1-31;14):May:2025)")
+    ([['1', '15', '29'], ['May'], ['2025']], '')
+    """
+
+    def atom(s):
+        return sepby(char(":"), choice(kwd_tuple, kwd))(s)
+
+    r, s = choice(atom, parens(xkwd))(s)
+    return r, s
 
 
-def qbound(s):
+def rexpr(s):
+    """
+    # >>> rexpr("sofia >= 10")
+    # (('#', [(['sofia'],), '>=', '10']), '')
+
+    # >>> rexpr("(1-31;14):May:2025 > 5")
+    # (('#', [(['1', '15', '29'], ['May'], ['2025']), '>', '5']), '')
+    """
     o = []
-    r, s = xkwd(s)
+    r, s = token(xkwd)(s)
     o.append(tuple(r))
-    r, s = token(
-        choice(string("<="), string(">="), string("="), string("<"), string(">"))
+    r, s = choice(
+        symbol("<="),
+        symbol(">="),
+        symbol("="),
+        symbol("<"),
+        symbol(">"),
     )(s)
     o.append(r)
     r, s = token(digits)(s)
@@ -138,25 +180,45 @@ def qbound(s):
 
 
 def expand(x):
+    """
+    >>> expand("3")
+    ['3']
+
+    >>> expand("1-5")
+    ['1', '2', '3', '4', '5']
+
+    >>> expand("2-10;3")
+    ['2', '5', '8']
+
+    >>> expand("5-1")
+    []
+    """
     span = re.fullmatch(r"(\d+)\s*-\s*(\d+)", x)
     if span:
-        return map(str, seq(*map(int, span.groups())))
+        return mapl(str, seq(*map(int, span.groups())))
     step = re.fullmatch(r"(\d+)\s*-\s*(\d+)\s*;\s*(\d+)", x)
     if step:
         i, j, k = map(int, step.groups())
-        return map(str, seq(i, i + k, j))
+        return mapl(str, seq(i, i + k, j))
     return [x]
 
 
-def unfold(q):
-    def norm(q):
-        return cartprodl(*[x if isinstance(x, list) else [x] for x in q])
+def normalize(r):
+    """
+    >>> normalize([[['1','15','29'], ['May'], ['2025']]])
+    [('1', 'May', '2025'), ('15', 'May', '2025'), ('29', 'May', '2025')]
 
-    if fst(q) == "#":
-        key, sym, val = snd(q)
-        return [("#", (x, sym, val)) for x in norm(key)]
-    else:
-        return norm(q)
+    >>> normalize([('#', [(['maria'], ['yoajung']), '>', '3'])])
+    [('#', (('maria', 'yoajung'), '>', '3'))]
+    """
+    o = []
+    for x in r:
+        if fst(x) == "#":
+            key, sym, val = snd(x)
+            o.append(("#", (fst(cartprodl(*key)), sym, val)))
+        else:
+            o.extend(cartprodl(*x))
+    return o
 
 
 # ---------------------------------------------------------------------
@@ -173,8 +235,8 @@ def unfold(q):
 
 
 def solve(args):
-    s = reader(args.FILE).read()
-    grid, policy = run_parser(parse_lot, s)
+    s = reader(args.FILE, "r", encoding="utf-8").read()
+    (grid, policy), _ = parse_lot(s)
     validate_policy(grid, policy)
     nodes = gen_nodes(grid)
     rmap = gen_rmap(nodes)
@@ -210,7 +272,7 @@ def solve(args):
             else:
                 continue
         if it > max_it:
-            error(f"Error, maximum iterations({max_it}) reached: Aborting.")
+            error(f"Aborted. Exceeded maximum iterations: {max_it}", e=Exception)
         max_acts += 1
         it += 1
 
@@ -254,10 +316,16 @@ def dsort(x):
 
 
 def expr(sym, lhs, rhs):
-    return (
-        {"<": op.lt, "<=": op.le, "=": op.eq, ">": op.gt, ">=": op.ge}.get(sym)
-        or error(f"Error, no such operator provided: {sym}")
-    )(lhs, rhs)
+    bop = {
+        "<": op.lt,
+        "<=": op.le,
+        "=": op.eq,
+        ">": op.gt,
+        ">=": op.ge,
+    }.get(sym)
+    if not bop:
+        error(f"Error, no such operator provided: {sym}", e=Exception)
+    return bop(lhs, rhs)
 
 
 def valid_results(consts, o):
@@ -276,10 +344,12 @@ def validate_policy(grid, policy):
             if k not in keys:
                 found.append((k, actor))
     if found:
-        print("Invalid keywords:")
+        out = ["Invalid keywords", ""]
         for k, actor in found:
-            print(f"    '{k}', from <{actor}>")
-        error(f"Error, found {len(found)} error(s).")
+            out.append(f"    '{k}', from <{actor}>")
+        out.append("")
+        out.append(f"Found {len(found)} error(s).")
+        error(unlines(out), e=Exception)
 
 
 def process_policy(model, vars, consts):
@@ -344,7 +414,7 @@ def read_prefs(prefs):
         elif sym in ["@", "/"]:
             d[sym] = int(o)
         else:
-            error(f"Error, used illegal symbol: {sym}")
+            error(f"Error, used illegal symbol: {sym}", e=Exception)
     return d
 
 
@@ -457,7 +527,7 @@ def report_and_export(consts, o, args):
         return ":".join(node)
 
     def cut(x):
-        return x.split()[0][:4]
+        return x.split()[0][:CUT_ACTOR_NAME]
 
     def uni(s):
         return sum(2 if east_asian_width(c) in {"W", "F"} else 1 for c in s)
@@ -517,14 +587,14 @@ def report_and_export(consts, o, args):
             ].width = (c + 2)
 
     def by_actors_xl(wb):
-        ws = wb.create_sheet(title="by-actors")
+        ws = wb.create_sheet(title="Actors")
         for actor in sort(consts["actors"]):
             for i, node in enumerate(o["actors"][actor]):
                 ws.append(["", jx(node)] if i else [actor, jx(node)])
         adjust(ws)
 
     def by_nodes_xl(wb):
-        ws = wb.create_sheet(title="by-nodes")
+        ws = wb.create_sheet(title="Nodes")
         for node in consts["nodes"]:
             ws.append([jx(node), o["nodes"][node]])
         adjust(ws)
@@ -534,15 +604,20 @@ def report_and_export(consts, o, args):
         ws = wb.create_sheet(title=f"{year}-{month:02d}")
         skyblue = PatternFill(start_color="cfecf7", fill_type="solid")
         gray = PatternFill(start_color="efefef", fill_type="solid")
+        bold = Font(bold=True)
         for col, day in enumerate(days, start=1):
-            ws.cell(row=1, column=col, value=day).fill = gray
+            cell = ws.cell(row=1, column=col, value=day)
+            cell.fill = gray
+            cell.font = bold
         for week in cal:
             row = []
             for col, day in enumerate(week, start=1):
                 row.append("" if day == 0 else day)
             ws.append(row)
             for col, day in enumerate(week, start=1):
-                ws.cell(row=ws.max_row, column=col).fill = skyblue
+                cell = ws.cell(row=ws.max_row, column=col)
+                cell.fill = skyblue
+                cell.font = bold
             for i in range(max(len(events.get(day, [])) for day in week)):
                 e = []
                 for day in week:
